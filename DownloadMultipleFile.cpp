@@ -19,6 +19,10 @@ class Task{
     // write to the FILE* passed via CURLOPT_WRITEDATA (stdout here)
     FILE* fp = static_cast<FILE*>(userp);
     size_t items = fwrite(buffer, size, nmemb, fp); 
+    if(items != nmemb){
+        std::perror("fwrite");
+        return 0; // returning 0 tells libcurl to abort the transfer
+    }
     return items * size; // MUST return bytes written
  }
 
@@ -43,9 +47,12 @@ void* download_thread(void* arg){
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, write_data);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, fp); // pass stdout to callback
     curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(handle, CURLOPT_USERAGENT, "DownloadMultipleFile/1.0");
+    curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, t->errbuf);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L); // safer in multithreaded programs
     curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L); // treat HTTP errors as failures
+    t->errbuf[0] = '\0'; // ensure error buffer is null-terminated
 
     CURLcode rc = curl_easy_perform(handle);
     if(rc==CURLE_OK){
@@ -67,7 +74,8 @@ void* download_thread(void* arg){
     }
 
     if(rc!=CURLE_OK){
-        std::cerr << "Error: " << t->url << t->errbuf << std::endl;
+        const char* err = t->errbuf[0] ? t->errbuf : curl_easy_strerror(rc);
+        std::cerr << "Error downloading " << t->url << ": " << err << std::endl;
     }else{
         t->result = 0;
     }
