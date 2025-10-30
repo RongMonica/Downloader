@@ -7,6 +7,7 @@
 #include <vector>
 #include <cstring>
 
+
 class Task{
     public:
         const char* url;
