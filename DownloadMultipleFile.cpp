@@ -8,7 +8,7 @@
 
 class Task{
     public:
-        const char* url;
+        const char* url;//qwe
         const char* outpath;
         int result; //0 = OK, else fail
         char errbuf[CURL_ERROR_SIZE];
