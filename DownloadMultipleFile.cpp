@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cstring>
 
 class Task{
@@ -12,7 +13,42 @@ class Task{
         const char* outpath;
         int result; //0 = OK, else fail
         char errbuf[CURL_ERROR_SIZE];
+        int last_percent;
 };
+
+pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int progress_callback(void* clientp,
+                             curl_off_t dltotal,
+                             curl_off_t dlnow,
+                             curl_off_t /*ultotal*/,
+                             curl_off_t /*ulnow*/){
+    Task* t = static_cast<Task*>(clientp);
+    if(!t){
+        return 0;
+    }
+
+    if(dltotal > 0){
+        int percent = static_cast<int>((dlnow * 100) / dltotal);
+        if(percent > 100){
+            percent = 100;
+        }
+        if(percent != t->last_percent){
+            t->last_percent = percent;
+            pthread_mutex_lock(&progress_mutex);
+            std::cout << "Downloading " << t->url << ": " << percent << "%" << std::endl;
+            pthread_mutex_unlock(&progress_mutex);
+        }
+    }else if(dlnow != 0 && dlnow / (1024 * 1024) != t->last_percent){
+        // Track roughly by megabytes when total size is unknown.
+        t->last_percent = static_cast<int>(dlnow / (1024 * 1024));
+        pthread_mutex_lock(&progress_mutex);
+        std::cout << "Downloading " << t->url << ": " << t->last_percent << " MiB received" << std::endl;
+        pthread_mutex_unlock(&progress_mutex);
+    }
+
+    return 0;
+}
 
  size_t write_data(void *buffer, size_t size, size_t nmemb, void *userp)
  {
@@ -52,6 +88,9 @@ void* download_thread(void* arg){
     curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, t->errbuf);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L); // safer in multithreaded programs
     curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L); // treat HTTP errors as failures
+    curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, progress_callback);
+    curl_easy_setopt(handle, CURLOPT_XFERINFODATA, t);
     t->errbuf[0] = '\0'; // ensure error buffer is null-terminated
 
     CURLcode rc = curl_easy_perform(handle);
@@ -87,35 +126,54 @@ void* download_thread(void* arg){
 
 
 int main(int argc, char* argv[]){
-    if(argc !=3){
+    if(argc <3){
         std::cerr << "Usage: " << argv[0] << " <url> <outfile>" << std::endl;
         return 1;
     }
-    curl_global_init(CURL_GLOBAL_ALL);
-
-    Task task;
-    task.url = argv[1];
-    task.outpath = argv[2];
-    task.result = 0;
-
-    pthread_t tid;
-    int err = pthread_create(&tid, NULL, download_thread, &task);
-    if(err != 0){
-        perror("pthread_create");
-        curl_global_cleanup();
+    if(((argc - 1) % 2) != 0){
+        std::cerr << "Each URL needs a corresponding output file path." << std::endl;
         return 1;
     }
 
-    //wait for the single download to complete
-    pthread_join(tid, NULL);
+    CURLcode init_rc = curl_global_init(CURL_GLOBAL_ALL);
+    if(init_rc != CURLE_OK){
+        std::cerr << "curl_global_init failed: " << curl_easy_strerror(init_rc) << std::endl;
+        return 1;
+    }
+
+    int num_threads = (argc-1)/2;
+    std::vector<Task> tasks(num_threads);
+    std::vector<pthread_t> tids(num_threads);
+    for(int i = 0; i < num_threads; i++){
+        tasks[i].url = argv[2*i+1];
+        tasks[i].outpath = argv[2*i + 2];
+        tasks[i].result = 0;
+        tasks[i].errbuf[0] = '\0';
+        tasks[i].last_percent = -1;
+        int err = pthread_create(&tids[i], NULL, download_thread, &tasks[i]);
+        if(err != 0){
+            std::cerr << "pthread_create failed: " << std::strerror(err) << std::endl;
+            for(int j = 0; j < i; ++j){
+                pthread_join(tids[j], NULL);
+            }
+            curl_global_cleanup();
+            return 1;
+        }
+    }
+    
+    //wait for the ALL downloads to complete
+    int exit_code = 0;
+    for(int i = 0; i < num_threads; i++){
+        pthread_join(tids[i], NULL);
+        if(tasks[i].result != 0){
+            std::cerr << "Failed: " << tasks[i].url << "," << tasks[i].outpath << std::endl;
+            exit_code = 1;
+            continue;
+        }
+        std::cout << "Task completed: " << tasks[i].url << "," << tasks[i].outpath << std::endl;
+    }
 
     curl_global_cleanup();
 
-    if(task.result != 0){
-        std::cerr << "Failed: " << task.url << "," << task.outpath << std::endl;
-        return 1;
-    }
-    std::cout << "Task completed: " << task.url << "," << task.outpath << std::endl;
-
-    return 0;
+    return exit_code;
 }
