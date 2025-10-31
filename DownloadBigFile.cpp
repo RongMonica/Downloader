@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string>
+#include <cstring>
 
 class Chunk{
     public:
@@ -23,6 +24,23 @@ static long long g_total_size = 0;
 static long long g_downloaded = 0;
 static int g_last_percent = -1;
 static pthread_mutex_t g_progress_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static long long local_file_size(const char* url){
+    const char* marker = strstr(url, "/download/");
+    if(!marker){
+        return -1;
+    }
+    std::string rel(marker + 10); // skip "/download/"
+    if(rel.empty()){
+        return -1;
+    }
+    std::string full = "/home/l/Rong_coding/Github/Practice/files/" + rel;
+    struct stat st{};
+    if(stat(full.c_str(), &st) != 0){
+        return -1;
+    }
+    return static_cast<long long>(st.st_size);
+}
 
 // callback: libcurl calls this when it receives data
 size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdata){
@@ -73,6 +91,8 @@ void *download_part(void *arg){
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, part);
 
+    curl_easy_setopt(curl, CURLOPT_IGNORE_CONTENT_LENGTH, 1L); // server sends full size even for ranged responses
+
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     CURLcode res = curl_easy_perform(curl);
@@ -97,28 +117,12 @@ int main(int argc, char *argv[]){
 
     curl_global_init(CURL_GLOBAL_ALL);
 
-    // get the file size first
-    CURL *curl = curl_easy_init();
-    curl_off_t file_size = 0;
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // head request, no body
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // follow redirects
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
-    CURLcode res = curl_easy_perform(curl);
-    if(res == CURLE_OK){
-        curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &file_size);
-    }else{
-        std::cerr << "HEAD request failed: " << curl_easy_strerror(res) << std::endl;
-    }
-
-    curl_easy_cleanup(curl);
-
-    if(file_size <= 0){
-        std::cerr << "cannot get file size. Maybe the server doesn't support it." << std::endl;
+    long long total_size = local_file_size(url);
+    if(total_size <= 0){
+        std::cerr << "cannot get local file size for URL: " << url << std::endl;
         curl_global_cleanup();
         return 1;
     }
-    long long total_size = static_cast<long long>(file_size);
     g_total_size = total_size;
     g_downloaded = 0;
     g_last_percent = -1;
