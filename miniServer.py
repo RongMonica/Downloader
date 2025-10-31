@@ -1,11 +1,9 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, abort
 import os
 
 app = Flask(__name__)
 
 # Serve downloadable files from the user's repository folder.
-FILES_DIRECTORY = os.path.expanduser("~/Rong_coding/Github/Practices/files")
-
 @app.get("/")
 def home():
     return "Welcome! Try /ping or /download/<filename>\n"
@@ -22,7 +20,11 @@ def echo():
 @app.get("/download/<path:filename>")
 def download_file(filename):
     directory = "/home/l/Rong_coding/Github/Practice/files"
-    return send_from_directory(directory, filename, as_attachment=True)
+    file_path = os.path.join(directory, filename)
+    if not os.path.isfile(file_path):
+        abort(404)
+    resp = send_from_directory(directory, filename, as_attachment=True, conditional = True)
+    return resp
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
