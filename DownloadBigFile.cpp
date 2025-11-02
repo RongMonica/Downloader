@@ -25,6 +25,8 @@ static long long g_downloaded = 0;
 static int g_last_percent = -1;
 static pthread_mutex_t g_progress_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+//assumes the server URL looks like http:://.../download/<filename>
+//works becasue the file is on the same machine as the server. If the server were remote, use libcurl HEAD.
 static long long local_file_size(const char* url){
     const char* marker = strstr(url, "/download/");
     if(!marker){
@@ -46,13 +48,16 @@ static long long local_file_size(const char* url){
 size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdata){
     Chunk *part = (Chunk*)userdata;
     size_t total = size * nmemb;
+
+    //write exactly where this chunk should go
     ssize_t written = pwrite(part->fd, ptr, total, part->start);
     if(written < 0){
         perror("pwrite");
         return 0;
     }
-    part->start += written;
+    part->start += written; //advance this chunk's next write offset
 
+    //progress (thread-safe)
     if(g_total_size > 0){
         pthread_mutex_lock(&g_progress_mutex);
         g_downloaded += written;
@@ -67,10 +72,10 @@ size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdata){
         pthread_mutex_unlock(&g_progress_mutex);
     }
 
-    return static_cast<size_t>(written);
+    return static_cast<size_t>(written); //return the number of bytes we consumed
 }
 
-// Thread function
+// Thread function: download one range
 void *download_part(void *arg){
     Chunk *part = (Chunk*)arg;
     CURL* curl = curl_easy_init();
@@ -91,8 +96,11 @@ void *download_part(void *arg){
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, part);
 
+    //some servers show original content-length even for 206
+    //this avoids libcurl getting confused by it
     curl_easy_setopt(curl, CURLOPT_IGNORE_CONTENT_LENGTH, 1L); // server sends full size even for ranged responses
 
+    //follow redirects (just in case)
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     CURLcode res = curl_easy_perform(curl);
@@ -104,6 +112,7 @@ void *download_part(void *arg){
 }
 
 int main(int argc, char *argv[]){
+    //Args: url, output, num_threads
     if(argc < 4){
         std::cerr << "Input not valid. Please input <function name> <url> <output> <num_threads>" << std::endl;
         return 1;
@@ -127,6 +136,7 @@ int main(int argc, char *argv[]){
     g_downloaded = 0;
     g_last_percent = -1;
 
+    //cap threads to not exceed bytes
     if(num_threads > total_size && total_size > 0){
         num_threads = static_cast<int>(total_size);
     }
@@ -136,6 +146,7 @@ int main(int argc, char *argv[]){
 
     std::cout << "File size: " << total_size << std::endl;
 
+    //create/resize output file
     int fd = open(outfile, O_CREAT | O_RDWR | O_TRUNC, 0666);
     if(fd < 0){
         perror("open");
@@ -149,6 +160,7 @@ int main(int argc, char *argv[]){
         return 1;
     }
 
+    //split ranges
     long long part_size = total_size / num_threads;
     if(part_size <= 0){
         part_size = 1;
@@ -169,6 +181,7 @@ int main(int argc, char *argv[]){
         pthread_create(&threads[i], NULL, download_part, &parts[i]);
     }
 
+    //wait for all threads
     for(int i = 0; i < num_threads; i++){
         pthread_join(threads[i], NULL);
     }
