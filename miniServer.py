@@ -19,7 +19,7 @@ def echo():
 
 @app.get("/download/<path:filename>")
 def download_file(filename):
-    directory = "/home/l/Rong_coding/Github/Practice/files"
+    directory = "/home/r/Rong_coding/Downloader/resources"
     file_path = os.path.join(directory, filename)
     if not os.path.isfile(file_path):
         abort(404)
@@ -27,4 +27,4 @@ def download_file(filename):
     return resp
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=19859, debug=True)

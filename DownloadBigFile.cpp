@@ -1,195 +1,95 @@
-#define _XOPEN_SOURCE 700
-#include <iostream>
-#include <curl/curl.h>
-#include <curl/easy.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string>
-#include <cstring>
+#include "downloader.h"
+#define DOWNLOAD_CHUNKS 5
 
-class Chunk{
-    public:
-        const char* url;
-        int fd;            // output file descriptor (shared, safe with pwrite())
-        long long start;   // inclusive
-        long long end;     // inclusive
-};
-
-static long long g_total_size = 0;
-static long long g_downloaded = 0;
-static int g_last_percent = -1;
-static pthread_mutex_t g_progress_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-//assumes the server URL looks like http:://.../download/<filename>
-//works becasue the file is on the same machine as the server. If the server were remote, use libcurl HEAD.
-static long long local_file_size(const char* url){
-    const char* marker = strstr(url, "/download/");
-    if(!marker){
-        return -1;
-    }
-    std::string rel(marker + 10); // skip "/download/"
-    if(rel.empty()){
-        return -1;
-    }
-    std::string full = "/home/l/Rong_coding/Github/Practice/files/" + rel;
-    struct stat st{};
-    if(stat(full.c_str(), &st) != 0){
-        return -1;
-    }
-    return static_cast<long long>(st.st_size);
-}
-
-// callback: libcurl calls this when it receives data
-size_t write_callback(void* ptr, size_t size, size_t nmemb, void* userdata){
-    Chunk *part = (Chunk*)userdata;
-    size_t total = size * nmemb;
-
-    //write exactly where this chunk should go
-    ssize_t written = pwrite(part->fd, ptr, total, part->start);
-    if(written < 0){
-        perror("pwrite");
-        return 0;
-    }
-    part->start += written; //advance this chunk's next write offset
-
-    //progress (thread-safe)
-    if(g_total_size > 0){
-        pthread_mutex_lock(&g_progress_mutex);
-        g_downloaded += written;
-        int percent = static_cast<int>((g_downloaded * 100) / g_total_size);
-        if(percent > 100){
-            percent = 100;
-        }
-        if(percent != g_last_percent){
-            g_last_percent = percent;
-            std::cout << "Progress: " << percent << "%" << std::endl;
-        }
-        pthread_mutex_unlock(&g_progress_mutex);
-    }
-
-    return static_cast<size_t>(written); //return the number of bytes we consumed
-}
-
-// Thread function: download one range
-void *download_part(void *arg){
-    Chunk *part = (Chunk*)arg;
-    CURL* curl = curl_easy_init();
-    if(!curl){
-        std::cerr << "Failed to create CURL handle" << std::endl;
-        return nullptr;
-    }
-
-    curl_easy_setopt(curl, CURLOPT_URL, part->url);
-
-    // set the range
-    char range[64];
-    long long range_start = part->start;
-    long long range_end = part->end;
-    snprintf(range, sizeof(range), "%lld-%lld", range_start, range_end);
-    curl_easy_setopt(curl, CURLOPT_RANGE, range);
-
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, part);
-
-    //some servers show original content-length even for 206
-    //this avoids libcurl getting confused by it
-    curl_easy_setopt(curl, CURLOPT_IGNORE_CONTENT_LENGTH, 1L); // server sends full size even for ranged responses
-
-    //follow redirects (just in case)
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-    if(res != CURLE_OK){
-        std::cerr << "Thread download failed: " << curl_easy_strerror(res) << std::endl;
-    }
-    curl_easy_cleanup(curl);
-    return nullptr;
-}
-
-int main(int argc, char *argv[]){
-    //Args: url, output, num_threads
-    if(argc < 4){
-        std::cerr << "Input not valid. Please input <function name> <url> <output> <num_threads>" << std::endl;
+//main entry: download one big file with multiple threads
+//vec_s[0] = url, vec_s[1] = outpath
+int download_big_file(const vector<string>& vec_s){
+    CURLcode rc = curl_global_init(CURL_GLOBAL_ALL);
+    if(rc != CURLE_OK){
+        cerr << "curl_glocbal_init failed!" << endl;
         return 1;
     }
-    const char *url = argv[1];
-    const char *outfile = argv[2];
-    int num_threads = atoi(argv[3]);
-    if(num_threads <= 0){
-        num_threads = 1;
+
+    string url = vec_s[0];
+    string outpath = vec_s[1];
+
+    //open the output file once and resize it
+    int fd = open(outpath.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0666);
+    if(fd < 0){
+        perror("open failed");
+        return 1;
     }
-
-    curl_global_init(CURL_GLOBAL_ALL);
-
-    long long total_size = local_file_size(url);
+    curl_off_t total_size = remote_file_size(url.c_str());
+    cout << "File size: " << total_size << endl;
     if(total_size <= 0){
-        std::cerr << "cannot get local file size for URL: " << url << std::endl;
+        cerr << "Cannnot get remore file size for URL: " << url << endl;
         curl_global_cleanup();
+        close(fd);
         return 1;
     }
-    g_total_size = total_size;
-    g_downloaded = 0;
-    g_last_percent = -1;
+    //pre-allocate file on disk
+    if(ftruncate(fd, total_size) != 0){
+        perror("ftruncate failed.");
+        curl_global_cleanup();
+        close(fd);
+        return 1;
+    }
+
+    //shared progress info
+    Progress prog;
+    prog.total_size = total_size;
 
     //cap threads to not exceed bytes
-    if(num_threads > total_size && total_size > 0){
+    int num_threads = DOWNLOAD_CHUNKS;
+    if(num_threads > total_size){
         num_threads = static_cast<int>(total_size);
     }
     if(num_threads <= 0){
         num_threads = 1;
     }
 
-    std::cout << "File size: " << total_size << std::endl;
-
-    //create/resize output file
-    int fd = open(outfile, O_CREAT | O_RDWR | O_TRUNC, 0666);
-    if(fd < 0){
-        perror("open");
-        curl_global_cleanup();
-        return 1;
-    }
-    if(ftruncate(fd, (off_t)total_size) != 0){
-        perror("ftruncate");
-        close(fd);
-        curl_global_cleanup();
-        return 1;
-    }
-
     //split ranges
-    long long part_size = total_size / num_threads;
-    if(part_size <= 0){
-        part_size = 1;
-    }
+    const curl_off_t chunk_size = total_size / num_threads;
+    const curl_off_t remainder = total_size % num_threads;
+    
+    vector<thread> workers;
+    workers.reserve(num_threads);
+    vector<Chunk> chunks;
+    chunks.reserve(num_threads);
+    curl_off_t offset = 0;
 
-    pthread_t threads[num_threads];
-    Chunk parts[num_threads];
-
-    for(int i = 0; i < num_threads; i++){
-        parts[i].url = url;
-        parts[i].fd = fd;
-        parts[i].start = part_size * i;
-        if(i == num_threads - 1){
-            parts[i].end = total_size - 1;
-        }else{
-            parts[i].end = parts[i].start + part_size - 1;
-        }
-        pthread_create(&threads[i], NULL, download_part, &parts[i]);
+    for(int i = 0; i < num_threads; ++i){
+        curl_off_t this_size = chunk_size + ((i == num_threads -1) ? remainder : 0);
+        chunks.emplace_back();
+        Chunk& chunk = chunks.back();
+        chunk.prog = &prog;
+        chunk.url = url;
+        chunk.fd = fd;
+        chunk.start = offset;
+        chunk.end = offset + this_size - 1;
+        chunk.result = 1;
+        
+        workers.emplace_back(download_one_chunk, ref(chunk));
+        offset += this_size;
     }
 
     //wait for all threads
-    for(int i = 0; i < num_threads; i++){
-        pthread_join(threads[i], NULL);
+    for(auto& th : workers){
+        if(th.joinable()){
+            th.join();
+        }
     }
-    if(g_total_size > 0 && g_last_percent < 100){
-        std::cout << "Progress: 100%" << std::endl;
+    int exit_code = 0;
+    int i = 0;
+    for(auto& c : chunks){
+        ++i;
+        if(c.result != 0){
+            cerr << "Chunk " << i << " fail to be downloaded" << endl;
+            exit_code = 1;
+        }
     }
     close(fd);
     curl_global_cleanup();
-    std::cout << "Download completed: " << outfile << std::endl;
-    return 0;
+   
+    return exit_code;
 }
