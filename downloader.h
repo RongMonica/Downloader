@@ -30,6 +30,10 @@ class Task{
         int result; //0 = OK, else fail
         char errbuf[CURL_ERROR_SIZE];
         int last_percent;
+    Task(const string& u, const string& o)
+        : url(u), outpath(o), result(1), last_percent(-1) {
+            errbuf[0] = '\0';
+        }
 };
 
 class Progress{

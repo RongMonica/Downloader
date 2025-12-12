@@ -1,3 +1,5 @@
 .vscode
 a.out
 build
+resources/
+destination/
