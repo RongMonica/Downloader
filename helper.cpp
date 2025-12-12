@@ -59,7 +59,7 @@ static int progress_callback(void* clientp,
         return;
     }
 
-    curl_easy_setopt(handle, CURLOPT_URL, t.url);
+    curl_easy_setopt(handle, CURLOPT_URL, t.url.c_str());
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, write_data_file);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, fp); // pass stdout to callback
     curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);

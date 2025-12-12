@@ -2,8 +2,10 @@
 
 int download_multiple_files(const vector<string>& vec_s){
     vector<Task> tasks;
-    for(int i = 0; i<vec_s.size();i++){
-        tasks.emplace_back(vec_s[i], vec_s[++i]);
+    for(int i = 0; i<vec_s.size();i += 2){
+        string url = vec_s[i];
+        string outpath = vec_s[i+1];
+        tasks.emplace_back(url, outpath);
     }
 
     vector<thread> workers;
