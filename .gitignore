@@ -1,5 +1,28 @@
-.vscode
-a.out
-build
+.vscode/
+
+# CMake and native build outputs
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Binaries and debug symbols
+*.out
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.pdb
+/modern_downloader
+/a.out
+
+# Local runtime/download output
 resources/
 destination/
